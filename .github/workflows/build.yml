@@ -1,0 +1,50 @@
+name: 构建 Wview 解包工具
+
+on:
+  workflow_dispatch:          # 允许在 GitHub 网页上手动触发
+  push:
+    tags:
+      - 'v*'                  # 打 tag 时自动触发（可选）
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'    # 3.11 对 Nuitka 兼容最好
+          architecture: 'x64'
+
+      - name: Install Nuitka
+        run: |
+          python -m pip install --upgrade pip
+          pip install nuitka
+
+      - name: Build with Nuitka
+        run: |
+          python -m nuitka `
+            --standalone `
+            --onefile `
+            --msvc=latest `
+            --assume-yes-for-downloads `
+            --windows-console-mode=force `
+            --output-dir=dist `
+            --output-filename=Wview_v2.exe `
+            --company-name="Wview Tool" `
+            --product-name="Wview Unpacker" `
+            --file-version=2.0.0.0 `
+            --product-version=2.0.0.0 `
+            wview_tool.py
+        shell: pwsh
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: wview-v2-windows
+          path: dist/Wview_v2.exe
+          if-no-files-found: error

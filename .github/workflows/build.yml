@@ -1,31 +1,87 @@
+# =============================================================================
+# 构建 Wview 解包工具（Windows EXE）
+#
+# 触发方式（二选一）：
+#   1) 手动触发：在 GitHub 网页 Actions 页面点击 "Run workflow"，
+#      并填写一个版本号（如 v2.0.0），会创建一个对应的 Release。
+#   2) 打 tag 触发：推送一个形如 v* 的 tag（如 v2.0.1），
+#      会用该 tag 名自动创建 Release。
+#
+# 产物：
+#   * Actions Artifacts（临时保存 90 天）
+#   * GitHub Releases（永久保存，可当备份）
+# =============================================================================
 name: 构建 Wview 解包工具
 
 on:
-  workflow_dispatch:          # 允许在 GitHub 网页上手动触发
+  # 手动触发，需要填一个版本号
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（作为 Release 的 tag，例如 v2.0.0）'
+        required: true
+        default: 'v2.0.0'
+        type: string
+
+  # 打 tag 自动触发，tag 名必须匹配 v* 才会运行
   push:
     tags:
-      - 'v*'                  # 打 tag 时自动触发（可选）
+      - 'v*'
 
 jobs:
   build:
+    name: 编译并发布
     runs-on: windows-latest
 
+    # 上传到 Releases 需要写权限；默认 token 只有读权限
+    permissions:
+      contents: write
+
     steps:
-      - name: Checkout
+      # ---------------------------------------------------------------------
+      # 1. 拉取仓库源码
+      # ---------------------------------------------------------------------
+      - name: 检出源码
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      # ---------------------------------------------------------------------
+      # 2. 安装 Python 3.11
+      #    * 选 3.11 是因为 Nuitka 对它兼容性最好；3.13 目前还有若干坑
+      #    * x64 与 windows-latest 的架构一致
+      # ---------------------------------------------------------------------
+      - name: 安装 Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'    # 3.11 对 Nuitka 兼容最好
+          python-version: '3.11'
           architecture: 'x64'
 
-      - name: Install Nuitka
+      # ---------------------------------------------------------------------
+      # 3. 安装 Nuitka
+      #    只需要装 Nuitka 本身；C 编译器由 runner 自带的 VS2022 提供
+      # ---------------------------------------------------------------------
+      - name: 安装 Nuitka
         run: |
           python -m pip install --upgrade pip
           pip install nuitka
+        shell: pwsh
 
-      - name: Build with Nuitka
+      # ---------------------------------------------------------------------
+      # 4. 用 Nuitka 编译 wview_tool.py
+      #
+      # 关键参数说明：
+      #   --standalone                 打包所有依赖，生成独立程序
+      #   --onefile                    合成单个 exe（启动时解压到临时目录）
+      #   --msvc=latest                使用 runner 预装的 Visual Studio 2022
+      #                                （不需要额外装 MinGW，也不占本地 C 盘）
+      #   --assume-yes-for-downloads   自动确认下载 ccache 等辅助工具
+      #   --windows-console-mode=force 保留控制台窗口（对应原 spec 的 console=True）
+      #   --output-dir=dist            产物输出到 dist 目录
+      #   --output-filename            产物文件名（用英文名，避免 artifact
+      #                                上传时中文名乱码；下载后自行改回中文即可）
+      #
+      # 注意：run 里用的是 PowerShell 的反引号 ` 续行，不是反斜杠
+      # ---------------------------------------------------------------------
+      - name: 用 Nuitka 编译
         run: |
           python -m nuitka `
             --standalone `
@@ -42,9 +98,51 @@ jobs:
             wview_tool.py
         shell: pwsh
 
-      - name: Upload EXE
+      # ---------------------------------------------------------------------
+      # 5. 上传为 Artifact
+      #    临时保存，方便在 Actions 页面直接下载查看
+      # ---------------------------------------------------------------------
+      - name: 上传构建产物到 Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: wview-v2-windows
           path: dist/Wview_v2.exe
           if-no-files-found: error
+
+      # ---------------------------------------------------------------------
+      # 6. 创建 GitHub Release 并上传 exe
+      #
+      # tag_name 的取值逻辑：
+      #   * 手动触发 -> 用输入框里填的版本号（github.event.inputs.version）
+      #   * tag 触发  -> 用 tag 名（github.ref_name）
+      #   表达式里的 || 相当于"前者为空则用后者"
+      #
+      # 说明：
+      #   * 如果对应 tag 的 Release 已存在，此步骤会更新它（覆盖同名附件）
+      #   * generate_release_notes 会自动生成 "What's Changed" 段落
+      # ---------------------------------------------------------------------
+      - name: 发布到 GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version || github.ref_name }}
+          name: Wview 解包工具 ${{ github.event.inputs.version || github.ref_name }}
+          body: |
+            ## Wview 解包工具 ${{ github.event.inputs.version || github.ref_name }}
+
+            由 GitHub Actions 自动构建，基于 Nuitka 编译。
+
+            ### 使用方法
+            1. 下载下方的 `Wview_v2.exe`
+            2. 改名为 `Wview-解包工具-v2.exe`（可选）
+            3. 把 `.mview` 文件直接拖到 exe 上运行
+
+            ### 提示
+            * 首次启动可能稍慢（onefile 需要解压到临时目录）
+            * 如需配置文件，可运行 `Wview_v2.exe --write-config` 生成模板
+          files: dist/Wview_v2.exe
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          # softprops/action-gh-release 需要这个 token 才有权限创建 Release
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

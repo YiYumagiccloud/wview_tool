@@ -889,21 +889,73 @@ MENU_CHOICES = [
 def _console_will_close():
     """判断进程退出后控制台窗口会不会消失（双击 / 拖放启动）。
 
-    原理：看当前控制台上挂着几个进程。只有自己一个，说明是系统为这个 exe
-    新开的窗口，退出就没了；如果是从 cmd/PowerShell 里启动的，父进程也挂在
-    同一个控制台上，数量 >= 2，就不需要多此一举地等回车。
+    原理：从当前进程开始向上追溯父进程链，看有没有 explorer.exe。
+      * 有   -> 是双击/拖放启动，窗口是系统为 exe 新开的，退出就没了，需要 pause。
+      * 没有 -> 是从 cmd/PowerShell 启动的，窗口是借用的，不需要多此一举。
+
+    为什么不用 GetConsoleProcessList：
+      Nuitka/PyInstaller 的 --onefile 模式下，exe 会先启动一个 bootstrap 进程，
+      再由它启动真正执行 Python 的子进程。两个进程挂在同一个控制台上，
+      所以进程数至少是 2，旧逻辑阈值 <= 1 会把拖放启动误判成命令行启动。
     """
     try:
         if not sys.stdout.isatty():
             return False
     except Exception:
         return False
+
     try:
         import ctypes
+        from ctypes import wintypes
+
+        TH32CS_SNAPPROCESS = 0x00000002
+        INVALID_HANDLE_VALUE = -1
+
+        class PROCESSENTRY32(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", ctypes.c_char * 260),
+            ]
+
         kernel32 = ctypes.windll.kernel32
-        buffer = (ctypes.c_uint * 16)()
-        count = kernel32.GetConsoleProcessList(buffer, 16)
-        return 0 < count <= 1
+        snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if snap == INVALID_HANDLE_VALUE:
+            return False
+
+        processes = {}
+        entry = PROCESSENTRY32()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
+        if kernel32.Process32First(snap, ctypes.byref(entry)):
+            while True:
+                processes[entry.th32ProcessID] = (
+                    entry.th32ParentProcessID,
+                    entry.szExeFile.decode("ascii", "replace").lower(),
+                )
+                if not kernel32.Process32Next(snap, ctypes.byref(entry)):
+                    break
+        kernel32.CloseHandle(snap)
+
+        pid = kernel32.GetCurrentProcessId()
+        seen = set()
+        while pid and pid not in seen:
+            seen.add(pid)
+            info = processes.get(pid)
+            if info is None:
+                break
+            parent_pid, _name = info
+            parent_info = processes.get(parent_pid)
+            if parent_info is not None and parent_info[1] == "explorer.exe":
+                return True
+            pid = parent_pid
+        return False
     except Exception:
         return False
 
